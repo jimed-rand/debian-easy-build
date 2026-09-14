@@ -40,6 +40,10 @@ function ui_kv() {
 }
 
 function ui_confirm() {
+    # If prompts are disabled, automatically accept the default.
+    if ! prompts_enabled; then
+        return 0
+    fi
     local prompt="${1:-Proceed?}"
     local default="${2:-y}"
     local hint yn
@@ -63,7 +67,7 @@ function ui_confirm() {
 FORCE_INTERACTIVE=0
 
 function prompts_enabled() {
-    [[ "$FORCE_INTERACTIVE" == "1" ]] || [[ -t 0 ]]
+    return 1
 }
 
 function assert_bool_var() {
@@ -627,9 +631,16 @@ function resolve_desktop_selection() {
 function interactive_toggle_pick() {
     local var_name="$1" heading="$2" install_label="$3" skip_label="$4" prompt_label="$5"
 
+    # When prompts are disabled, fall back to environment variable value or default to 0.
     if ! prompts_enabled; then
-        ui_err "No terminal is available. Set ${var_name}=0|1."
-        exit 1
+        # Use existing env var if set, otherwise default to 0 (disabled).
+        if [[ -z "${!var_name}" ]]; then
+            export "$var_name"="0"
+        else
+            export "$var_name"="${!var_name}"
+        fi
+        ui_ok "${var_name}=${!var_name} (auto)"
+        return
     fi
 
     ui_heading "$heading"

@@ -277,10 +277,10 @@ Scripts run in alphabetical order by filename. Ensure your hook scripts have exe
 
 ## Host System Requirements
 
-- Linux operating system (Debian, Ubuntu, Arch Linux, Fedora, etc.).
-- Root or sudo privileges.
-- Minimum 20 GB free disk space for ISO builds, 40+ GB for disk image builds.
+- Linux operating system (Debian or Debian‑based distributions). For other Linux distributions the build can be run inside a Docker container with a rootful Docker socket (i.e., Docker daemon exposed to the container) and the required tools installed inside the container.
+- Root or sudo privileges (or Docker rootful mode when using Docker).
+- Minimum 20 GB free disk space for ISO builds, 40+ GB for disk image builds.
 - Required host tools:
-  - ISO builds: debootstrap, squashfs-tools, xorriso.
-  - Image builds: debootstrap, parted, dosfstools, e2fsprogs, rsync, qemu-utils (for VM exports).
-- On Arch Linux, install host tools with pacman (e.g. pacman -S debootstrap squashfs-tools libisoburn parted dosfstools e2fsprogs rsync qemu-img). Never install Debian .deb packages on Arch Linux host.
+   - ISO builds: debootstrap, squashfs-tools, xorriso.
+   - Image builds: debootstrap, parted, dosfstools, e2fsprogs, rsync, qemu-utils (for VM exports).
+   - When using Docker, ensure the container image includes the above packages (e.g., via `apt install ...`).

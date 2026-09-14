@@ -45,6 +45,13 @@ for arg in "$@"; do
             show_start_help
             exit 0
             ;;
+        --auto)
+            # Run in fully automated mode: skip any interactive prompts.
+            # This forces the underlying builder to use its non‑interactive path.
+            # Users can still supply a config file via --config=FILE.
+            # The flag is consumed here; remaining args are passed through.
+            AUTO_MODE=1
+            ;;
     esac
 done
 
@@ -80,6 +87,11 @@ done
 
 if [[ "$GENERATE_CONFIG" -eq 1 ]]; then
     PASS_ARGS+=("--generate-config")
+fi
+
+# If auto mode requested, ensure the builder runs non‑interactive.
+if [[ "${AUTO_MODE:-0}" -eq 1 ]]; then
+    PASS_ARGS+=("--no-interactive")
 fi
 
 case "${BUILD_DISTRO,,}" in
