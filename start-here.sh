@@ -60,9 +60,11 @@ if [[ -t 1 ]]; then
 fi
 
 GENERATE_CONFIG=0
+CONFIG_PATH=""
 for arg in "$@"; do
     case "$arg" in
         --create-config|--generate-config) GENERATE_CONFIG=1 ;;
+        --config-path=*) CONFIG_PATH="${arg#--config-path=}" ;;
     esac
 done
 
@@ -92,6 +94,24 @@ fi
 # If auto mode requested, ensure the builder runs non‑interactive.
 if [[ "${AUTO_MODE:-0}" -eq 1 ]]; then
     PASS_ARGS+=("--no-interactive")
+    # When no explicit output type was provided, default to ISO silently.
+    if [[ -z "$BUILD_OUTPUT" ]]; then
+        BUILD_OUTPUT="iso"
+    fi
+    # If a config path was not supplied, default to a config file in the current directory.
+    if [[ -z "$CONFIG_PATH" ]]; then
+        CONFIG_PATH="$(pwd)/build.cfg"
+        # If the config does not exist, ask the builder to generate one.
+        if [[ ! -f "$CONFIG_PATH" ]]; then
+            GENERATE_CONFIG=1
+        fi
+    fi
+    # Pass the config path to the builder.
+    if [[ -n "$CONFIG_PATH" ]]; then
+        PASS_ARGS+=("--config=$CONFIG_PATH")
+    fi
+    # Keep the output files in the user's current folder.
+    PASS_ARGS+=("--output-dir=$(pwd)")
 fi
 
 case "${BUILD_DISTRO,,}" in
