@@ -87,6 +87,7 @@ Caper Debian packages (.deb) are stored in caper-deb/ in this repository:
 1. Existing Packages: If a valid .deb exists in caper-deb/, the build script uses it directly.
 2. Debian Host Compilation: If building on a Debian host with dpkg-dev tools, Caper is compiled on the host and copied to caper-deb/.
 3. Non-Debian Host Compilation (such as Arch Linux): The build script copies Caper source into the debootstrap chroot, installs build dependencies inside the chroot, runs dpkg-buildpackage inside the chroot, exports the compiled .deb back to caper-deb/ on the host, and installs it into the image. The host environment remains completely free of foreign packages.
+4. Automated Upstream Tracking: A GitHub Actions workflow (.github/workflows/caper-deb.yml) checks upstream Caper (https://git.disroot.org/jimedrand/caper) at least every 48 hours. When a new commit is detected, it automatically rebuilds the Debian package with make deb, replaces older packages in caper-deb/, and commits the update.
 
 ---
 
