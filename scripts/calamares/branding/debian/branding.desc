@@ -1,0 +1,30 @@
+---
+componentName: debian
+
+welcomeStyleCalamares: true
+welcomeExpandingLogo:  true
+windowExpanding:       normal
+windowSize:            800px,520px
+
+strings:
+    productName:         Debian GNU/Linux
+    shortProductName:    Debian
+    version:             @VERSION@
+    shortVersion:        @CODENAME@
+    versionedName:       Debian GNU/Linux @VERSION@
+    shortVersionedName:  Debian @VERSION@
+    bootloaderEntryName: Debian
+    productUrl:          https://www.debian.org/
+
+images:
+    productLogo:         "logo.png"
+    productIcon:         "icon.png"
+
+slideshow:               "show.qml"
+slideshowAPI:            1
+
+style:
+    SidebarBackground:        "#26475b"
+    SidebarText:              "#FFFFFF"
+    SidebarTextCurrent:       "#fbfbfb"
+    SidebarBackgroundCurrent: "#265370"

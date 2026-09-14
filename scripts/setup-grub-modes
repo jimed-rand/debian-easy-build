@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+target = "/etc/grub.d/10_linux"
+if not os.path.exists(target):
+    sys.exit(0)
+
+with open(target, "r", encoding="utf-8") as stream:
+    body = stream.read()
+
+if "(desktop mode)" not in body:
+    if not os.path.exists(target + ".orig"):
+        with open(target + ".orig", "w", encoding="utf-8") as stream:
+            stream.write(body)
+
+    entry_pattern = r'linux_entry\s+"?\$\{OS\}"?\s+"?\$\{version\}"?\s+simple\s*\\\s*"[^\n]*\$\{GRUB_CMDLINE_LINUX_DEFAULT\}"?'
+    entry_replacement = (
+        'distro_label="${GRUB_DISTRIBUTOR:-Debian}"\n'
+        '    distro_label="${distro_label% GNU/Linux}"\n'
+        '    linux_entry "${distro_label} (desktop mode)" "${version}" simple "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}"\n'
+        '    linux_entry "${distro_label} (CLI mode)" "${version}" cli "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT} systemd.unit=multi-user.target 3"'
+    )
+    body = re.sub(entry_pattern, entry_replacement, body)
+
+    type_pattern = r"if\s+\[\s+x\$type\s+!=\s+xsimple\s+\]\s*;\s*then"
+    type_replacement = "if [ x$type != xsimple ] && [ x$type != xcli ] ; then"
+    body = re.sub(type_pattern, type_replacement, body)
+
+    id_line = 'echo "menuentry \'$(echo "$os" | grub_quote)\' ${CLASS} \\$menuentry_id_option \'gnulinux-simple-$boot_device_id\' {" | sed "s/^/$submenu_indentation/"'
+    id_replacement = (
+        'if [ x$type = xcli ] ; then\n'
+        '          echo "menuentry \'$(echo "$os" | grub_quote)\' ${CLASS} \\$menuentry_id_option \'gnulinux-cli-$boot_device_id\' {" | sed "s/^/$submenu_indentation/"\n'
+        '      else\n'
+        '          echo "menuentry \'$(echo "$os" | grub_quote)\' ${CLASS} \\$menuentry_id_option \'gnulinux-simple-$boot_device_id\' {" | sed "s/^/$submenu_indentation/"\n'
+        '      fi'
+    )
+    if id_line in body:
+        body = body.replace(id_line, id_replacement)
+
+    with open(target, "w", encoding="utf-8") as stream:
+        stream.write(body)
+    os.chmod(target, 0o755)
+
+default_path = "/etc/default/grub"
+if os.path.exists(default_path):
+    with open(default_path, "r", encoding="utf-8") as stream:
+        conf = stream.read()
+    if "GRUB_TIMEOUT_STYLE=" in conf:
+        conf = re.sub(r"GRUB_TIMEOUT_STYLE=\S+", "GRUB_TIMEOUT_STYLE=menu", conf)
+    else:
+        conf = conf.rstrip() + "\nGRUB_TIMEOUT_STYLE=menu\n"
+    if "GRUB_TIMEOUT=0" in conf:
+        conf = conf.replace("GRUB_TIMEOUT=0", "GRUB_TIMEOUT=5")
+    with open(default_path, "w", encoding="utf-8") as stream:
+        stream.write(conf)
+
+updater = shutil.which("update-grub")
+if updater:
+    subprocess.run([updater], check=False)
+elif os.path.exists("/usr/sbin/grub-mkconfig") and os.path.exists("/boot/grub"):
+    subprocess.run(["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"], check=False)

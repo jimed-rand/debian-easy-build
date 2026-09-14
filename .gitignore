@@ -1,0 +1,4 @@
+scripts/build.cfg
+scripts/build-img.cfg
+scripts/build-vm.cfg
+scripts/build-removable.cfg

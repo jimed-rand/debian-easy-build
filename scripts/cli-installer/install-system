@@ -1,0 +1,1260 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+shopt -s nocasematch
+
+SCRIPT_NAME="${BASH_SOURCE[0]##*/}"
+LIVE_SQUASHFS=""
+if [ -f "/cdrom/casper/filesystem.squashfs" ]; then
+    LIVE_SQUASHFS="/cdrom/casper/filesystem.squashfs"
+elif [ -f "/cdrom/caper/filesystem.squashfs" ]; then
+    LIVE_SQUASHFS="/cdrom/caper/filesystem.squashfs"
+elif [ -f "/run/live/medium/casper/filesystem.squashfs" ]; then
+    LIVE_SQUASHFS="/run/live/medium/casper/filesystem.squashfs"
+elif [ -f "/run/live/medium/caper/filesystem.squashfs" ]; then
+    LIVE_SQUASHFS="/run/live/medium/caper/filesystem.squashfs"
+fi
+
+LIVE_CDROM="/cdrom"
+[ -d "/run/live/medium" ] && LIVE_CDROM="/run/live/medium"
+
+SUPPORTED_LOCALES="aa_DJ.UTF-8 UTF-8
+af_ZA.UTF-8 UTF-8
+am_ET.UTF-8 UTF-8
+ar_EG.UTF-8 UTF-8
+ast_ES.UTF-8 UTF-8
+be_BY.UTF-8 UTF-8
+bg_BG.UTF-8 UTF-8
+bn_BD.UTF-8 UTF-8
+br_FR.UTF-8 UTF-8
+bs_BA.UTF-8 UTF-8
+ca_ES.UTF-8 UTF-8
+cs_CZ.UTF-8 UTF-8
+cy_GB.UTF-8 UTF-8
+da_DK.UTF-8 UTF-8
+de_AT.UTF-8 UTF-8
+de_CH.UTF-8 UTF-8
+de_DE.UTF-8 UTF-8
+el_GR.UTF-8 UTF-8
+en_AU.UTF-8 UTF-8
+en_CA.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+en_IE.UTF-8 UTF-8
+en_NZ.UTF-8 UTF-8
+en_US.UTF-8 UTF-8
+en_ZA.UTF-8 UTF-8
+eo.UTF-8 UTF-8
+es_AR.UTF-8 UTF-8
+es_CL.UTF-8 UTF-8
+es_ES.UTF-8 UTF-8
+es_MX.UTF-8 UTF-8
+et_EE.UTF-8 UTF-8
+eu_ES.UTF-8 UTF-8
+fa_IR.UTF-8 UTF-8
+fi_FI.UTF-8 UTF-8
+fo_FO.UTF-8 UTF-8
+fr_BE.UTF-8 UTF-8
+fr_CA.UTF-8 UTF-8
+fr_CH.UTF-8 UTF-8
+fr_FR.UTF-8 UTF-8
+ga_IE.UTF-8 UTF-8
+gd_GB.UTF-8 UTF-8
+gl_ES.UTF-8 UTF-8
+gu_IN.UTF-8 UTF-8
+he_IL.UTF-8 UTF-8
+hi_IN.UTF-8 UTF-8
+hr_HR.UTF-8 UTF-8
+hu_HU.UTF-8 UTF-8
+hy_AM.UTF-8 UTF-8
+id_ID.UTF-8 UTF-8
+is_IS.UTF-8 UTF-8
+it_CH.UTF-8 UTF-8
+it_IT.UTF-8 UTF-8
+ja_JP.UTF-8 UTF-8
+ka_GE.UTF-8 UTF-8
+kk_KZ.UTF-8 UTF-8
+km_KH.UTF-8 UTF-8
+kn_IN.UTF-8 UTF-8
+ko_KR.UTF-8 UTF-8"
+
+TARGET_ROOT="/mnt/target"
+MOUNT_POINTS=()
+LOCALE=""
+LANG_CHOICE=""
+COUNTRY=""
+KEYBOARD_LAYOUT=""
+KEYBOARD_VARIANT=""
+TIMEZONE=""
+DISK_MODE=""
+DISK_TARGET=""
+EFI_PART=""
+BOOT_PART=""
+ROOT_PART=""
+SWAP_PART=""
+SWAP_FILE_CREATE=0
+USERNAME=""
+FULLNAME=""
+PASSWORD=""
+HOSTNAME=""
+ROOT_PASSWORD=""
+UI_MODE=""
+USE_NTP=1
+INSTALL_BROWSER="none"
+INSTALL_WEB_SERVER=0
+INSTALL_SSH_SERVER=0
+INSTALL_COCKPIT=0
+
+log()   { printf "==> %s\n" "$*"; }
+info()  { printf "[i] %s\n" "$*"; }
+ok()    { printf "[+] %s\n" "$*"; }
+warn()  { printf "[!] %s\n" "$*" >&2; }
+err()   { printf "[x] %s\n" "$*" >&2; }
+step()  { printf "\n-- %s --\n" "$*"; }
+hr()    { printf "%s\n" "----------------------------------------------------------------------"; }
+banner() {
+    printf "%s\n" "================================================================"
+    printf "  %s\n" "$*"
+    printf "%s\n" "================================================================"
+}
+
+die() {
+    err "$*"
+    cleanup_mounts
+    exit 1
+}
+
+trap "on_interrupt" INT TERM
+on_interrupt() {
+    err "Interrupted. Unmounting target and aborting."
+    cleanup_mounts
+    exit 130
+}
+
+cleanup_mounts() {
+    local mp
+    for (( idx=${#MOUNT_POINTS[@]}-1 ; idx>=0 ; idx-- )); do
+        mp="${MOUNT_POINTS[$idx]}"
+        [ -n "$mp" ] || continue
+        if mountpoint -q "$mp" 2>/dev/null; then
+            umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+        fi
+    done
+    [ -n "$SWAP_PART" ] && swapoff "$SWAP_PART" 2>/dev/null || true
+    [ -d "$TARGET_ROOT" ] && rmdir "$TARGET_ROOT" 2>/dev/null || true
+}
+
+text_input() {
+    local prompt="$1" default="${2:-}" value=""
+    if [ -n "$default" ]; then
+        printf "%s [%s]: " "$prompt" "$default"
+    else
+        printf "%s: " "$prompt"
+    fi
+    IFS= read -r value
+    if [ -z "$value" ] && [ -n "$default" ]; then
+        printf "%s\n" "$default"
+        REPLY="$default"
+    else
+        REPLY="$value"
+    fi
+}
+
+text_password() {
+    local prompt="$1" first="" second=""
+    while :; do
+        printf "%s: " "$prompt"
+        IFS= read -rs first || true
+        printf "\n"
+        printf "Confirm %s: " "$prompt"
+        IFS= read -rs second || true
+        printf "\n"
+        if [ "$first" != "$second" ]; then
+            warn "Passwords do not match. Try again."
+            continue
+        fi
+        if [ -z "$first" ]; then
+            warn "Password cannot be empty. Try again."
+            continue
+        fi
+        if [ "${#first}" -lt 8 ]; then
+            warn "Password must be at least 8 characters. Try again."
+            continue
+        fi
+        REPLY="$first"
+        return 0
+    done
+}
+
+text_yesno() {
+    local prompt="$1" default="${2:-}" ans="" suffix=""
+    if [ "$default" = "y" ]; then suffix=" [Y/n]"
+    elif [ "$default" = "n" ]; then suffix=" [y/N]"
+    else suffix=" [y/n]"; fi
+    while :; do
+        printf "%s%s: " "$prompt" "$suffix"
+        IFS= read -r ans
+        ans="${ans:-$default}"
+        case "$ans" in
+            y|Y|yes|YES) REPLY="y"; return 0 ;;
+            n|N|no|NO)   REPLY="n"; return 0 ;;
+            *) warn "Please answer y or n." ;;
+        esac
+    done
+}
+
+text_choice() {
+    local prompt="$1" default="$2"; shift 2
+    local i=1 choice
+    hr
+    printf "%s\n" "$prompt"
+    for choice in "$@"; do
+        if [ "$i" -eq "$default" ]; then
+            printf "  > %d) %s\n" "$i" "$choice"
+        else
+            printf "    %d) %s\n" "$i" "$choice"
+        fi
+        i=$((i+1))
+    done
+    hr
+    local ans
+    while :; do
+        printf "Select [1-%d] (default %d): " "$(($#))" "$default"
+        IFS= read -r ans
+        ans="${ans:-$default}"
+        if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le $# ]; then
+            REPLY="${!ans}"
+            return 0
+        fi
+        warn "Invalid choice: $ans"
+    done
+}
+
+have_whiptail() { command -v whiptail >/dev/null 2>&1; }
+have_dialog()  { command -v dialog  >/dev/null 2>&1; }
+
+tui_msg() {
+    local title="$1" msg="$2"
+    if have_whiptail; then
+        whiptail --title "$title" --msgbox "$msg" 16 72
+    else
+        dialog --title "$title" --msgbox "$msg" 16 72
+    fi
+}
+
+tui_yesno() {
+    local title="$1" text="$2" default="${3:-0}"
+    local rc
+    if have_whiptail; then
+        whiptail --title "$title" --yesno "$text" 12 72 --defaultno
+        rc=$?
+    else
+        dialog --title "$title" --yesno "$text" 12 72
+        rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then REPLY="y"; else REPLY="n"; fi
+}
+
+tui_input() {
+    local title="$1" text="$2" default="${3:-}" rc
+    if have_whiptail; then
+        REPLY="$(whiptail --title "$title" --inputbox "$text" 10 72 "$default" 3>&1 1>&2 2>&3)" || true
+    else
+        REPLY="$(dialog --title "$title" --inputbox "$text" 10 72 "$default" 3>&1 1>&2 2>&3)" || true
+    fi
+    [ -z "$REPLY" ] && REPLY="$default"
+}
+
+tui_password() {
+    local title="$1" text="$2" rc
+    if have_whiptail; then
+        REPLY="$(whiptail --title "$title" --passwordbox "$text" 10 72 3>&1 1>&2 2>&3)" || true
+    else
+        REPLY="$(dialog --title "$title" --passwordbox "$text" 10 72 3>&1 1>&2 2>&3)" || true
+    fi
+}
+
+tui_menu() {
+    local title="$1" text="$2" default="$3"; shift 3
+    local rc
+    if have_whiptail; then
+        REPLY="$(whiptail --title "$title" --menu "$text" 20 72 12 "$@" --default-item "$default" 3>&1 1>&2 2>&3)" || true
+    else
+        REPLY="$(dialog --title "$title" --menu "$text" 20 72 12 "$@" 3>&1 1>&2 2>&3)" || true
+    fi
+}
+
+ui_msg()      { [ "$UI_MODE" = "tui" ] && tui_msg      "$@" || { local t="$1"; shift; printf "%s\n\n" "$t"; printf "%s\n" "$*"; printf "Press Enter to continue... "; IFS= read -r _; }; }
+ui_yesno()    { if [ "$UI_MODE" = "tui" ]; then tui_yesno  "$@"; else local t="$1" m="$2" d="${3:-}"; text_yesno "$m" "$d"; fi }
+ui_input()    { if [ "$UI_MODE" = "tui" ]; then tui_input  "$@"; else local t="$1" m="$2" d="${3:-}"; text_input "$m" "$d"; fi }
+ui_password() { if [ "$UI_MODE" = "tui" ]; then tui_password "$@"; else local t="$1" m="$2"; text_password "$m"; fi }
+ui_menu()     { if [ "$UI_MODE" = "tui" ]; then tui_menu "$@"; else local t="$1" m="$2" d="$3"; shift 3; text_choice "$m" "$d" "$@"; fi }
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        die "This installer must be run as root (try: sudo $SCRIPT_NAME)."
+    fi
+}
+
+check_live_env() {
+    if [ -z "$LIVE_SQUASHFS" ] || [ ! -f "$LIVE_SQUASHFS" ]; then
+        die "Live squashfs not found. This installer must be run from the Debian live media."
+    fi
+    if ! [ -d "$LIVE_CDROM" ]; then
+        die "Live CD mountpoint $LIVE_CDROM not found. Are you running on the live media?"
+    fi
+}
+
+step_welcome() {
+    banner "Welcome to the Debian CLI Installer"
+    info "This installer copies the live system to your disk and configures"
+    info "users, locale, timezone, keyboard, GRUB, and packages."
+    info "It is fully interactive - every step asks before doing anything."
+    info "It supports Erase disk and Manual partition modes."
+    hr
+
+    if have_whiptail || have_dialog; then
+        text_choice "Choose the user interface:" 1 \
+            "TUI (whiptail/dialog boxes - recommended)" \
+            "Plain text prompts"
+        case "$REPLY" in
+            *TUI*|*whiptail*) UI_MODE="tui" ;;
+            *)                  UI_MODE="text" ;;
+        esac
+    else
+        UI_MODE="text"
+        info "No whiptail/dialog detected - using plain text prompts."
+    fi
+
+    if [ "$UI_MODE" = "tui" ]; then
+        ui_msg "Welcome" "Welcome to the Debian CLI Installer.\n\nThe installer will guide you through:\n  1. Locale and keyboard\n  2. Timezone\n  3. Disk target\n  4. User account\n  5. Installation\n  6. Reboot\n\nPress OK to continue."
+    else
+        ui_yesno "Start the installation now?" "y"
+        [ "$REPLY" = "y" ] || die "Aborted by user at welcome screen."
+    fi
+}
+
+read_i18n_entries() {
+    awk 'NF>=2 && $2 ~ /UTF-8/ { printf "%s\t%s\n", $1, $1 }' <<<"$SUPPORTED_LOCALES"
+}
+
+step_locale() {
+    step "Locale"
+    hr
+    info "Choose your locale. Default if you press Enter: en_US.UTF-8"
+    info "Tip: enter the language code (e.g. de_DE or fr_FR) to filter."
+
+    local map_file
+    map_file="$(mktemp)"
+    read_i18n_entries > "$map_file"
+
+    local default_locale="en_US.UTF-8"
+
+    if [ "$UI_MODE" = "tui" ]; then
+        local args=()
+        while IFS=$'\t' read -r tag pretty; do
+            [ -z "$tag" ] && continue
+            args+=("$tag" "$pretty")
+        done < "$map_file"
+        tui_menu "Locale" "Pick your locale (default: en_US.UTF-8)" "$default_locale" "${args[@]}"
+        LANG_CHOICE="$REPLY"
+    else
+        local filter="" filtered
+        while :; do
+            text_input "Filter (Enter for full list, or en_US, de_DE, fr_FR, etc.)" ""
+            filter="$REPLY"
+            if [ -z "$filter" ]; then
+                filtered="$(cat "$map_file")"
+            else
+                filtered="$(grep -i "$filter" "$map_file" || true)"
+            fi
+            if [ -z "$filtered" ]; then
+                warn "No locales matched $filter - try again."
+                continue
+            fi
+            local lines=() line tag pretty
+            while IFS= read -r line; do
+                tag="${line%%	*}"
+                lines+=("$tag")
+            done <<< "$filtered"
+            info "Matching locales:"
+            local i=1
+            while IFS=$'\t' read -r tag pretty; do
+                [ -z "$tag" ] && continue
+                printf "  %3d) %s\n" "$i" "$tag"
+                i=$((i+1))
+            done <<< "$filtered"
+            text_input "Choose a locale by number" "1"
+            if [[ "$REPLY" =~ ^[0-9]+$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le "${#lines[@]}" ]; then
+                LANG_CHOICE="${lines[$((REPLY-1))]}"
+                break
+            fi
+            warn "Invalid selection."
+        done
+    fi
+    rm -f "$map_file"
+
+    LOCALE="$LANG_CHOICE"
+    COUNTRY="${LOCALE#*_}"
+    COUNTRY="${COUNTRY%.*}"
+    ok "Locale: $LOCALE"
+}
+
+read_xkb_layouts() {
+    cat <<'EOF'
+us	English (US)
+gb	English (UK)
+de	German
+de_CH	German (Switzerland)
+fr	French
+fr_CH	French (Switzerland)
+it	Italian
+es	Spanish
+pt	Portuguese
+pt_BR	Portuguese (Brazil)
+nl	Dutch
+ru	Russian
+uk	Ukrainian
+pl	Polish
+cs	Czech
+sk	Slovak
+ro	Romanian
+hu	Hungarian
+el	Greek
+tr	Turkish
+sv	Swedish
+da	Danish
+no	Norwegian
+fi	Finnish
+is	Icelandic
+ja	Japanese
+ko	Korean
+zh_CN	Chinese (Simplified)
+zh_TW	Chinese (Traditional)
+ar	Arabic
+he	Hebrew
+hi	Devanagari/Hindi
+th	Thai
+vi	Vietnamese
+id	Indonesian
+EOF
+}
+
+step_keyboard() {
+    step "Keyboard"
+    hr
+    info "Choose your keyboard layout. Default if you press Enter: us"
+
+    local default_layout="us"
+    if [ "$UI_MODE" = "tui" ]; then
+        local args=() tag pretty
+        while IFS=$'\t' read -r tag pretty; do
+            [ -z "$tag" ] && continue
+            args+=("$tag" "$pretty")
+        done < <(read_xkb_layouts)
+        tui_menu "Keyboard" "Pick a keyboard layout (default: us)" "$default_layout" "${args[@]}"
+        KEYBOARD_LAYOUT="$REPLY"
+    else
+        info "Common layouts:"
+        local lines=() tag pretty
+        while IFS=$'\t' read -r tag pretty; do
+            [ -z "$tag" ] && continue
+            lines+=("$tag")
+        done < <(read_xkb_layouts)
+        local i=1
+        while IFS=$'\t' read -r tag pretty; do
+            [ -z "$tag" ] && continue
+            printf "  %3d) %-8s %s\n" "$i" "$tag" "$pretty"
+            i=$((i+1))
+        done < <(read_xkb_layouts)
+        text_input "Choose a layout by number, or type a custom XKB name" "1"
+        if [[ "$REPLY" =~ ^[0-9]+$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le "${#lines[@]}" ]; then
+            KEYBOARD_LAYOUT="${lines[$((REPLY-1))]}"
+        else
+            KEYBOARD_LAYOUT="$REPLY"
+        fi
+    fi
+    KEYBOARD_VARIANT=""
+    ok "Keyboard layout: $KEYBOARD_LAYOUT"
+}
+
+read_timezones() {
+    cat <<'EOF'
+Africa/Cairo
+Africa/Johannesburg
+Africa/Lagos
+Africa/Nairobi
+America/Anchorage
+America/Argentina/Buenos_Aires
+America/Bogota
+America/Chicago
+America/Denver
+America/Halifax
+America/Los_Angeles
+America/Mexico_City
+America/New_York
+America/Phoenix
+America/Sao_Paulo
+America/Toronto
+Asia/Bangkok
+Asia/Dubai
+Asia/Hong_Kong
+Asia/Jakarta
+Asia/Karachi
+Asia/Kolkata
+Asia/Manila
+Asia/Seoul
+Asia/Shanghai
+Asia/Singapore
+Asia/Taipei
+Asia/Tehran
+Asia/Tokyo
+Atlantic/Azores
+Australia/Melbourne
+Australia/Perth
+Australia/Sydney
+Europe/Amsterdam
+Europe/Berlin
+Europe/Brussels
+Europe/Dublin
+Europe/Istanbul
+Europe/Kyiv
+Europe/Lisbon
+Europe/London
+Europe/Madrid
+Europe/Moscow
+Europe/Paris
+Europe/Prague
+Europe/Rome
+Europe/Stockholm
+Europe/Vienna
+Europe/Warsaw
+Europe/Zurich
+Pacific/Auckland
+Pacific/Honolulu
+UTC
+EOF
+}
+
+list_all_timezones() {
+    if [ -d /usr/share/zoneinfo/posix ]; then
+        find /usr/share/zoneinfo/posix -mindepth 1 -type f -printf "%P\n" | sort
+    elif [ -d /usr/share/zoneinfo ]; then
+        find /usr/share/zoneinfo -mindepth 1 -type f -printf "%P\n" | sort
+    else
+        warn "No zoneinfo directory found; falling back to UTC."
+        echo "UTC"
+    fi
+}
+
+step_timezone() {
+    step "Timezone"
+    hr
+
+    if [ "$USE_NTP" -eq 1 ] && command -v timedatectl >/dev/null 2>&1; then
+        info "Checking internet connectivity for NTP sync..."
+        if timeout 5 bash -c "</dev/tcp/2.pool.ntp.org/123" 2>/dev/null; then
+            info "Internet reachable - attempting NTP sync via systemd-timesyncd..."
+            timedatectl set-ntp true >/dev/null 2>&1 || true
+            sleep 2
+            local ntp_status
+            ntp_status="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+            if [ "$ntp_status" = "yes" ]; then
+                ok "System clock synchronised with NTP."
+            else
+                warn "NTP not yet synchronised - falling back to live session clock."
+            fi
+        else
+            warn "No internet - NTP sync skipped. Using live session clock."
+        fi
+    fi
+
+    local current_tz guess_default
+    guess_default="America/New_York"
+    if [ -f /etc/timezone ]; then
+        current_tz="$(cat /etc/timezone 2>/dev/null || true)"
+    fi
+    if [ -n "$current_tz" ] && [ -e "/usr/share/zoneinfo/$current_tz" ]; then
+        guess_default="$current_tz"
+    fi
+
+    if [ "$UI_MODE" = "tui" ]; then
+        local args=() tz
+        while IFS= read -r tz; do
+            [ -z "$tz" ] && continue
+            args+=("$tz" "$tz")
+        done < <(read_timezones)
+        args+=("__custom__" "Custom (type any IANA timezone)")
+        tui_menu "Timezone" "Pick a timezone (default: $guess_default)" "$guess_default" "${args[@]}"
+        if [ "$REPLY" = "__custom__" ]; then
+            tui_input "Custom timezone" "Enter an IANA timezone (e.g. Asia/Tokyo):" "$guess_default"
+            TIMEZONE="$REPLY"
+        else
+            TIMEZONE="$REPLY"
+        fi
+    else
+        info "Common timezones:"
+        local lines=() line tz
+        while IFS= read -r tz; do
+            [ -z "$tz" ] && continue
+            lines+=("$tz")
+        done < <(read_timezones)
+        local i=1
+        while IFS= read -r tz; do
+            [ -z "$tz" ] && continue
+            printf "  %3d) %s\n" "$i" "$tz"
+            i=$((i+1))
+        done < <(read_timezones)
+        printf "  %3d) %s\n" "$i" "Custom (type any IANA timezone)"
+        text_input "Choose a timezone by number" "1"
+        if [[ "$REPLY" =~ ^[0-9]+$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le "${#lines[@]}" ]; then
+            TIMEZONE="${lines[$((REPLY-1))]}"
+        else
+            text_input "Enter an IANA timezone" "$guess_default"
+            TIMEZONE="$REPLY"
+        fi
+    fi
+
+    if [ ! -e "/usr/share/zoneinfo/$TIMEZONE" ]; then
+        warn "Unknown timezone $TIMEZONE - falling back to UTC."
+        TIMEZONE="UTC"
+    fi
+    ok "Timezone: $TIMEZONE"
+}
+
+list_block_devices() {
+    lsblk -bdno NAME,SIZE,MODEL,TYPE 2>/dev/null \
+        | awk '$4 == "disk" { printf "/dev/%s\t%s\t%s\n", $1, $2, $3 }'
+}
+
+step_disk() {
+    step "Disk"
+    hr
+    info "Choose how to partition the target disk."
+
+    if [ "$UI_MODE" = "tui" ]; then
+        tui_yesno "Erase disk" "Erase the entire disk and let the installer partition it?\n\nChoose No to drop into cfdisk for manual partitioning (advanced)."
+        DISK_MODE="erase"
+        [ "$REPLY" = "n" ] && DISK_MODE="manual"
+    else
+        text_yesno "Erase the entire disk and let the installer partition it?\n(Choose n to use manual partition mode.)" "y"
+        [ "$REPLY" = "y" ] && DISK_MODE="erase" || DISK_MODE="manual"
+    fi
+
+    local devmap
+    devmap="$(mktemp)"
+    list_block_devices > "$devmap"
+    if [ ! -s "$devmap" ]; then
+        rm -f "$devmap"
+        die "No candidate block devices found."
+    fi
+
+    if [ "$UI_MODE" = "tui" ]; then
+        local args=() dev size model
+        while IFS=$'\t' read -r dev size model; do
+            [ -z "$dev" ] && continue
+            local human
+            human="$(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"
+            args+=("$dev" "$human - $model")
+        done < "$devmap"
+        tui_menu "Target disk" "Pick the disk to install onto" "${args[0]}" "${args[@]}"
+        DISK_TARGET="$REPLY"
+    else
+        info "Available disks:"
+        local lines=() line dev size model
+        while IFS=$'\t' read -r dev size model; do
+            [ -z "$dev" ] && continue
+            lines+=("$dev")
+            local human
+            human="$(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"
+            printf "  %d) %s  (%s - %s)\n" "${#lines[@]}" "$dev" "$human" "$model"
+        done < "$devmap"
+        text_input "Choose a disk by number" "1"
+        if [[ "$REPLY" =~ ^[0-9]+$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le "${#lines[@]}" ]; then
+            DISK_TARGET="${lines[$((REPLY-1))]}"
+        else
+            die "Invalid disk selection."
+        fi
+    fi
+    rm -f "$devmap"
+
+    if [ "$DISK_MODE" = "erase" ]; then
+        if [ "$UI_MODE" = "tui" ]; then
+            tui_yesno "Confirm erase" "ALL DATA on $DISK_TARGET will be destroyed.\n\nProceed?"
+        else
+            text_yesno "ALL DATA on $DISK_TARGET will be destroyed. Proceed?" "n"
+        fi
+        [ "$REPLY" = "y" ] || die "Aborted by user before partitioning."
+    else
+        if [ "$UI_MODE" = "tui" ]; then
+            tui_msg "Manual partition" "You will be dropped into cfdisk on $DISK_TARGET.\n\nCreate at minimum:\n  - A 512 MiB EFI System Partition (type EFI)\n  - A root partition (type Linux filesystem)\n  - Optionally a swap partition\n\nWhen you exit cfdisk (Write -> Quit), the installer will continue."
+        else
+            info "You will be dropped into cfdisk on $DISK_TARGET."
+            info "Create at minimum:"
+            info "  - A 512 MiB EFI System Partition (type EFI)"
+            info "  - A root partition (type Linux filesystem)"
+            info "  - Optionally a swap partition"
+            info "When you exit cfdisk (Write -> Quit), the installer will continue."
+        fi
+    fi
+    ok "Target disk: $DISK_TARGET ($DISK_MODE mode)"
+}
+
+validate_username() {
+    local u="$1"
+    [[ "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
+    case "$u" in
+        root|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy|www-data|backup|list|irc|nobody|_apt|systemd-*|messagebus|sshd) return 1 ;;
+    esac
+    return 0
+}
+
+step_user() {
+    step "User account"
+    hr
+
+    ui_input "Full name" "Enter the real name for the new user (or leave empty to skip)" ""
+    FULLNAME="$REPLY"
+
+    while :; do
+        ui_input "Username" "Enter a username (lowercase, starts with a letter)" "user"
+        USERNAME="$REPLY"
+        if validate_username "$USERNAME"; then break; fi
+        warn "Invalid username $USERNAME. Use lowercase letters/digits/_/-, max 32 chars, not root or system names."
+    done
+
+    while :; do
+        ui_password "Password" "Enter a password for $USERNAME (min 8 chars)"
+        PASSWORD="$REPLY"
+        if [ "${#PASSWORD}" -lt 8 ]; then
+            warn "Password must be at least 8 characters. Try again."
+            continue
+        fi
+        ui_password "Confirm password" "Re-enter the password to confirm"
+        if [ "$REPLY" = "$PASSWORD" ]; then break; fi
+        warn "Passwords do not match. Try again."
+    done
+
+    while :; do
+        ui_input "Hostname" "Enter a hostname for this machine" "debian"
+        HOSTNAME="$REPLY"
+        [[ "$HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || { warn "Invalid hostname."; continue; }
+        break
+    done
+
+    ok "User: $FULLNAME ($USERNAME) on $HOSTNAME"
+}
+
+step_software() {
+    step "Additional Software"
+    hr
+    info "Choose web browser and additional server components to install."
+
+    if [ "$UI_MODE" = "tui" ]; then
+        tui_menu "Web Browser" "Select a browser to install (or none):" "none" \
+            "none" "Do not install a web browser" \
+            "firefox-esr" "Firefox ESR (Debian official)" \
+            "chromium" "Chromium (Debian official)" \
+            "brave" "Brave Browser" \
+            "librewolf" "LibreWolf"
+        INSTALL_BROWSER="$REPLY"
+
+        tui_yesno "Web Server" "Install task-web-server (Apache, PHP, etc.)?"
+        [ "$REPLY" = "y" ] && INSTALL_WEB_SERVER=1 || INSTALL_WEB_SERVER=0
+
+        tui_yesno "SSH Server" "Install task-ssh-server?"
+        [ "$REPLY" = "y" ] && INSTALL_SSH_SERVER=1 || INSTALL_SSH_SERVER=0
+
+        tui_yesno "Cockpit" "Install Cockpit web-based administration?"
+        [ "$REPLY" = "y" ] && INSTALL_COCKPIT=1 || INSTALL_COCKPIT=0
+    else
+        printf "Web browser choices:\n"
+        printf "  1) None\n"
+        printf "  2) Firefox ESR\n"
+        printf "  3) Chromium\n"
+        printf "  4) Brave Browser\n"
+        printf "  5) LibreWolf\n"
+        text_input "Choose a browser by number" "1"
+        case "$REPLY" in
+            2) INSTALL_BROWSER="firefox-esr" ;;
+            3) INSTALL_BROWSER="chromium" ;;
+            4) INSTALL_BROWSER="brave" ;;
+            5) INSTALL_BROWSER="librewolf" ;;
+            *) INSTALL_BROWSER="none" ;;
+        esac
+
+        text_yesno "Install task-web-server (Apache, PHP)?" "n"
+        [ "$REPLY" = "y" ] && INSTALL_WEB_SERVER=1 || INSTALL_WEB_SERVER=0
+
+        text_yesno "Install task-ssh-server?" "n"
+        [ "$REPLY" = "y" ] && INSTALL_SSH_SERVER=1 || INSTALL_SSH_SERVER=0
+
+        text_yesno "Install Cockpit web administration?" "n"
+        [ "$REPLY" = "y" ] && INSTALL_COCKPIT=1 || INSTALL_COCKPIT=0
+    fi
+}
+
+step_summary() {
+    step "Summary"
+    hr
+    local summary
+    summary="$(cat <<EOF
+Locale         : $LOCALE
+Keyboard       : $KEYBOARD_LAYOUT${KEYBOARD_VARIANT:+ ($KEYBOARD_VARIANT)}
+Timezone       : $TIMEZONE
+
+Installation type : ${DISK_MODE}
+Target disk       : ${DISK_TARGET}
+
+User:
+  Full name : $FULLNAME
+  Username  : $USERNAME
+  Hostname  : $HOSTNAME
+
+Software:
+  Browser    : $INSTALL_BROWSER
+  Web server : $([ "$INSTALL_WEB_SERVER" -eq 1 ] && echo "yes" || echo "no")
+  SSH server : $([ "$INSTALL_SSH_SERVER" -eq 1 ] && echo "yes" || echo "no")
+  Cockpit    : $([ "$INSTALL_COCKPIT" -eq 1 ] && echo "yes" || echo "no")
+
+A reboot will be issued after installation completes.
+EOF
+)"
+    if [ "$UI_MODE" = "tui" ]; then
+        tui_msg "Summary" "$summary"
+    else
+        printf "%s\n" "$summary"
+    fi
+
+    ui_yesno "Proceed with installation?" "n"
+    [ "$REPLY" = "y" ] || die "Aborted by user at the summary step."
+}
+
+partition_erase() {
+    local dev="$1"
+    info "Wiping $dev and creating a fresh GPT layout (512 MiB ESP + 4 GiB swap + root)."
+
+    wipefs -af "$dev" >/dev/null 2>&1 || true
+    sgdisk --zap-all "$dev" >/dev/null
+
+    sgdisk -n1:0:+512M -t1:EF00 -c1:"EFI System" "$dev" >/dev/null
+    sgdisk -n2:0:+4G   -t2:8200 -c2:"swap"        "$dev" >/dev/null
+    sgdisk -n3:0:0    -t3:8300 -c3:"root"         "$dev" >/dev/null
+    partprobe "$dev" >/dev/null 2>&1 || true
+    sleep 1
+    udevadm settle >/dev/null 2>&1 || true
+
+    if [[ "$dev" =~ (nvme|mmcblk) ]]; then
+        EFI_PART="${dev}p1"
+        SWAP_PART="${dev}p2"
+        ROOT_PART="${dev}p3"
+    else
+        EFI_PART="${dev}1"
+        SWAP_PART="${dev}2"
+        ROOT_PART="${dev}3"
+    fi
+    [ -b "$EFI_PART" ]  || die "EFI partition $EFI_PART not found after partitioning."
+    [ -b "$SWAP_PART" ] || die "Swap partition $SWAP_PART not found after partitioning."
+    [ -b "$ROOT_PART" ] || die "Root partition $ROOT_PART not found after partitioning."
+
+    info "Formatting EFI ($EFI_PART) as FAT32..."
+    mkfs.fat -F32 -n EFI "$EFI_PART" >/dev/null
+    info "Formatting swap ($SWAP_PART)..."
+    mkswap -L swap "$SWAP_PART" >/dev/null
+    info "Formatting root ($ROOT_PART) as ext4..."
+    mkfs.ext4 -F -L root "$ROOT_PART" >/dev/null
+}
+
+partition_manual() {
+    local dev="$1"
+    info "Launching cfdisk on $dev. Create at minimum: an ESP, root, and optionally swap."
+    if ! command -v cfdisk >/dev/null 2>&1; then
+        die "cfdisk is not installed; cannot run manual partitioning."
+    fi
+    cfdisk "$dev" || true
+    partprobe "$dev" >/dev/null 2>&1 || true
+    sleep 1
+    udevadm settle >/dev/null 2>&1 || true
+
+    local parts=()
+    mapfile -t parts < <(lsblk -lnpo NAME,TYPE "$dev" | awk '$2 == "part" { print $1 }')
+    [ "${#parts[@]}" -ge 2 ] || die "Expected at least 2 partitions on $dev after manual partitioning."
+
+    EFI_PART=""
+    SWAP_PART=""
+    ROOT_PART=""
+    for p in "${parts[@]}"; do
+        local fstype
+        fstype="$(blkid -s TYPE -o value "$p" 2>/dev/null || true)"
+        case "$fstype" in
+            vfat) EFI_PART="$p" ;;
+            swap)  SWAP_PART="$p" ;;
+            ext4|btrfs|xfs) ROOT_PART="$p" ;;
+        esac
+    done
+
+    if [ -z "$SWAP_PART" ]; then
+        if [ "$UI_MODE" = "tui" ]; then
+            tui_yesno "Swap" "No swap partition detected. Use a swap file on the root filesystem instead?"
+        else
+            text_yesno "No swap partition detected. Use a swap file on the root filesystem instead?" "n"
+        fi
+        SWAP_FILE_CREATE=$([ "$REPLY" = "y" ] && echo 1 || echo 0)
+    else
+        SWAP_FILE_CREATE=0
+    fi
+
+    [ -n "$EFI_PART" ]  || die "Could not find an EFI System Partition (vfat) on $dev."
+    [ -n "$ROOT_PART" ] || die "Could not find a root partition (ext4/btrfs/xfs) on $dev."
+    if [ -z "$SWAP_PART" ] && [ "$SWAP_FILE_CREATE" -eq 0 ]; then
+        warn "No swap and no swap file - continuing without swap."
+    fi
+}
+
+mount_target() {
+    info "Mounting target filesystems under $TARGET_ROOT."
+    mkdir -p "$TARGET_ROOT"
+    mount "$ROOT_PART" "$TARGET_ROOT"
+    MOUNT_POINTS+=("$TARGET_ROOT")
+    mkdir -p "$TARGET_ROOT/boot/efi"
+    mount "$EFI_PART" "$TARGET_ROOT/boot/efi"
+    MOUNT_POINTS+=("$TARGET_ROOT/boot/efi")
+    if [ -n "$SWAP_PART" ]; then
+        swapon "$SWAP_PART" || warn "swapon $SWAP_PART failed - continuing."
+    fi
+    mount -t proc  proc  "$TARGET_ROOT/proc";  MOUNT_POINTS+=("$TARGET_ROOT/proc")
+    mount -t sysfs sysfs "$TARGET_ROOT/sys";  MOUNT_POINTS+=("$TARGET_ROOT/sys")
+    mount --bind /dev "$TARGET_ROOT/dev";     MOUNT_POINTS+=("$TARGET_ROOT/dev")
+    mount -t tmpfs tmpfs "$TARGET_ROOT/run";  MOUNT_POINTS+=("$TARGET_ROOT/run")
+    mount --bind /run/udev "$TARGET_ROOT/run/udev" 2>/dev/null || true
+    if [ -d /sys/firmware/efi ]; then
+        mount -t efivarfs efivarfs "$TARGET_ROOT/sys/firmware/efi/efivars" 2>/dev/null || true
+    fi
+    mount --bind /run/systemd/resolve "$TARGET_ROOT/run/systemd/resolve" 2>/dev/null || true
+}
+
+unpack_target() {
+    info "Unpacking live squashfs into $TARGET_ROOT..."
+    if command -v unsquashfs >/dev/null 2>&1; then
+        unsquashfs -d "$TARGET_ROOT" -f "$LIVE_SQUASHFS"
+    else
+        local tmp_mnt
+        tmp_mnt="$(mktemp -d)"
+        mount -t squashfs -o loop "$LIVE_SQUASHFS" "$tmp_mnt"
+        rsync -aHAX --numeric-ids "$tmp_mnt"/ "$TARGET_ROOT"/
+        umount "$tmp_mnt"
+        rmdir "$tmp_mnt"
+    fi
+    ok "Live filesystem unpacked."
+}
+
+run_in_chroot() {
+    chroot "$TARGET_ROOT" /bin/bash -c "$1"
+}
+
+configure_machineid() {
+    info "Generating /etc/machine-id in target."
+    systemd-machine-id-setup --root="$TARGET_ROOT" >/dev/null 2>&1 \
+        || chroot "$TARGET_ROOT" /bin/bash -c "systemd-machine-id-setup"
+    run_in_chroot "dbus-uuidgen --ensure=/etc/machine-id"
+}
+
+configure_fstab() {
+    info "Writing /etc/fstab (UUID-based)."
+    local fstab="$TARGET_ROOT/etc/fstab"
+    {
+        if [ -n "$EFI_PART" ]; then
+            local efi_uuid
+            efi_uuid="$(blkid -s UUID -o value "$EFI_PART")"
+            printf "UUID=%s\t/boot/efi\tvfat\tumask=0077\t0\t2\n" "$efi_uuid"
+        fi
+        if [ -n "$ROOT_PART" ]; then
+            local root_uuid
+            root_uuid="$(blkid -s UUID -o value "$ROOT_PART")"
+            printf "UUID=%s\t/\t%s\tdefaults\t0\t1\n" "$root_uuid" "$(blkid -s TYPE -o value "$ROOT_PART")"
+        fi
+        if [ -n "$SWAP_PART" ]; then
+            local swap_uuid
+            swap_uuid="$(blkid -s UUID -o value "$SWAP_PART")"
+            printf "UUID=%s\tnone\tswap\tsw\t0\t0\n" "$swap_uuid"
+        fi
+    } > "$fstab"
+}
+
+configure_locale() {
+    info "Generating locale $LOCALE in the target."
+    echo "$LOCALE UTF-8" >> "$TARGET_ROOT/etc/locale.gen"
+    run_in_chroot "locale-gen $LOCALE"
+    run_in_chroot "update-locale LANG=$LOCALE"
+    echo "LANG=$LOCALE" > "$TARGET_ROOT/etc/default/locale"
+    run_in_chroot "ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime"
+    run_in_chroot "dpkg-reconfigure -f noninteractive tzdata"
+}
+
+configure_keyboard() {
+    info "Configuring keyboard layout in target ($KEYBOARD_LAYOUT)."
+    cat > "$TARGET_ROOT/etc/default/keyboard" <<EOF
+XKBLAYOUT="$KEYBOARD_LAYOUT"
+XKBVARIANT="$KEYBOARD_VARIANT"
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+    run_in_chroot "dpkg-reconfigure -f noninteractive keyboard-configuration || true"
+    run_in_chroot "setupcon -k 2>/dev/null || true"
+}
+
+create_user() {
+    info "Creating user $USERNAME with home directory, default groups, and sudoers."
+    run_in_chroot "useradd -m -s /bin/bash -c $(printf %q "$FULLNAME") $USERNAME"
+    run_in_chroot "echo '$USERNAME:$PASSWORD' | chpasswd"
+    for g in adm cdrom dip lpadmin plugdev sudo; do
+        run_in_chroot "usermod -aG $g $USERNAME" || true
+    done
+}
+
+configure_displaymanager() {
+    info "Configuring display manager (autodetect)."
+    chroot "$TARGET_ROOT" /bin/bash -c '
+        set -e
+        for dm in gdm3 lightdm sddm; do
+            if dpkg -s "$dm" >/dev/null 2>&1; then
+                systemctl --root=/ enable "$dm" >/dev/null 2>&1 || true
+            fi
+        done
+    '
+}
+
+configure_network() {
+    info "Writing minimal /etc/network/interfaces (loopback only)."
+    cat > "$TARGET_ROOT/etc/network/interfaces" <<EOF
+auto lo
+iface lo inet loopback
+EOF
+}
+
+configure_hwclock() {
+    info "Setting hardware clock to UTC."
+    run_in_chroot "hwclock --systohc --utc" || warn "hwclock failed - continuing."
+}
+
+configure_initramfs() {
+    info "Regenerating initramfs for all installed kernels."
+    chroot "$TARGET_ROOT" /bin/bash -c '
+        set -e
+        if command -v update-initramfs >/dev/null 2>&1; then
+            for img in /boot/vmlinuz-*; do
+                [ -e "$img" ] || continue
+                ver="${img##*/vmlinuz-}"
+                update-initramfs -c -k "$ver" || true
+            done
+        elif command -v dracut >/dev/null 2>&1; then
+            dracut --regenerate-all --force
+        fi
+    '
+}
+
+configure_grubcfg() {
+    info "Writing /etc/default/grub."
+    cat > "$TARGET_ROOT/etc/default/grub" <<EOF
+GRUB_DEFAULT=0
+GRUB_TIMEOUT_STYLE=menu
+GRUB_TIMEOUT=10
+GRUB_DISTRIBUTOR="Debian"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+GRUB_CMDLINE_LINUX=""
+GRUB_ENABLE_CRYPTODISK=true
+EOF
+}
+
+install_bootloader() {
+    info "Installing GRUB to $DISK_TARGET."
+
+    if [ -d /sys/firmware/efi ]; then
+        chroot "$TARGET_ROOT" /bin/bash -c "
+            set -e
+            grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck
+        "
+    else
+        chroot "$TARGET_ROOT" /bin/bash -c "
+            set -e
+            grub-install --target=i386-pc $DISK_TARGET
+        "
+    fi
+
+    if [ -d /sys/firmware/efi ] && command -v grub-install >/dev/null 2>&1; then
+        chroot "$TARGET_ROOT" /bin/bash -c "
+            grub-install --target=i386-pc $DISK_TARGET
+        " 2>/dev/null || true
+    fi
+
+    if [ -x "$TARGET_ROOT/usr/local/sbin/setup-grub-modes" ]; then
+        run_in_chroot "/usr/local/sbin/setup-grub-modes"
+    elif [ -x /usr/local/sbin/setup-grub-modes ]; then
+        cp -a /usr/local/sbin/setup-grub-modes "$TARGET_ROOT/usr/local/sbin/setup-grub-modes"
+        run_in_chroot "/usr/local/sbin/setup-grub-modes"
+    fi
+
+    run_in_chroot "grub-mkconfig -o /boot/grub/grub.cfg"
+}
+
+install_software() {
+    if [ "$INSTALL_BROWSER" != "none" ] || [ "$INSTALL_WEB_SERVER" -eq 1 ] || [ "$INSTALL_SSH_SERVER" -eq 1 ] || [ "$INSTALL_COCKPIT" -eq 1 ]; then
+        info "Installing selected software into target..."
+        chroot "$TARGET_ROOT" /bin/bash -c "
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -o Acquire::http::Timeout=15 update || true
+            case '$INSTALL_BROWSER' in
+                firefox-esr)
+                    apt-get install -y --no-install-recommends firefox-esr || true
+                    ;;
+                chromium)
+                    apt-get install -y --no-install-recommends chromium || true
+                    ;;
+                brave)
+                    if command -v curl >/dev/null 2>&1; then
+                        curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg 2>/dev/null || true
+                        echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main' > /etc/apt/sources.list.d/brave-browser-release.list
+                        apt-get update || true
+                        apt-get install -y brave-browser || true
+                    fi
+                    ;;
+                librewolf)
+                    if command -v curl >/dev/null 2>&1; then
+                        curl -fsSLo /usr/share/keyrings/librewolf.gpg https://deb.librewolf.net/keyring.gpg 2>/dev/null || true
+                        echo 'deb [signed-by=/usr/share/keyrings/librewolf.gpg] http://deb.librewolf.net sid main' > /etc/apt/sources.list.d/librewolf.sources
+                        apt-get update || true
+                        apt-get install -y librewolf || true
+                    fi
+                    ;;
+            esac
+            if [ '$INSTALL_WEB_SERVER' -eq 1 ]; then
+                apt-get install -y --no-install-recommends task-web-server || true
+            fi
+            if [ '$INSTALL_SSH_SERVER' -eq 1 ]; then
+                apt-get install -y --no-install-recommends task-ssh-server || true
+                systemctl --root=/ enable ssh || true
+            fi
+            if [ '$INSTALL_COCKPIT' -eq 1 ]; then
+                apt-get install -y --no-install-recommends cockpit || true
+                systemctl --root=/ enable cockpit.socket || true
+            fi
+        " || true
+    fi
+}
+
+normalize_sid() {
+    if [ -f "$TARGET_ROOT/etc/os-release" ] && grep -qi "sid\|unstable" "$TARGET_ROOT/etc/os-release"; then
+        cat << "EOF" > "$TARGET_ROOT/etc/os-release"
+PRETTY_NAME="Debian GNU/Linux Sid"
+NAME="Debian GNU/Linux"
+VERSION_CODENAME=sid
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+EOF
+        if [ -f "$TARGET_ROOT/usr/lib/os-release" ] && ! [ "$TARGET_ROOT/etc/os-release" -ef "$TARGET_ROOT/usr/lib/os-release" ]; then
+            cp -f "$TARGET_ROOT/etc/os-release" "$TARGET_ROOT/usr/lib/os-release"
+        fi
+        if [ -f "$TARGET_ROOT/etc/debian_version" ]; then
+            sed -i "s#[^/[:space:]]*/sid#sid#g" "$TARGET_ROOT/etc/debian_version"
+        fi
+    fi
+}
+
+strip_live_packages() {
+    info "Removing live-only packages from the target."
+    chroot "$TARGET_ROOT" /bin/bash -c '
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get -y purge \
+            calamares \
+            casper \
+            caper \
+            cifs-utils \
+            discover \
+            laptop-detect \
+            os-prober 2>/dev/null || true
+        apt-get -y autoremove --purge || true
+    '
+    info "Installing localization packages for $LOCALE (best-effort, online only)."
+    local short="${LOCALE%.*}"
+    local lang="${short%_*}"
+    chroot "$TARGET_ROOT" /bin/bash -c "
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        for pkg in hunspell-\$short libreoffice-help-\$short libreoffice-l10n-\$short hunspell-\$lang libreoffice-help-\$lang libreoffice-l10n-\$lang; do
+            apt-get install -y --no-install-recommends \"\$pkg\" 2>/dev/null || true
+        done
+    " || true
+}
+
+umount_target() {
+    info "Unmounting target filesystems."
+    swapoff "$SWAP_PART" 2>/dev/null || true
+    for (( idx=${#MOUNT_POINTS[@]}-1 ; idx>=0 ; idx-- )); do
+        local mp="${MOUNT_POINTS[$idx]}"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || warn "Could not unmount $mp."
+        fi
+    done
+    MOUNT_POINTS=()
+    [ -d "$TARGET_ROOT" ] && rmdir "$TARGET_ROOT" 2>/dev/null || true
+}
+
+run_installation() {
+    step "Installation"
+    hr
+
+    if [ "$DISK_MODE" = "erase" ]; then
+        partition_erase "$DISK_TARGET"
+    else
+        partition_manual "$DISK_TARGET"
+    fi
+
+    mount_target
+    unpack_target
+    configure_machineid
+    configure_fstab
+    configure_locale
+    configure_keyboard
+    create_user
+    configure_displaymanager
+    configure_network
+    configure_hwclock
+    configure_initramfs
+    configure_grubcfg
+    install_bootloader
+    install_software
+    normalize_sid
+    strip_live_packages
+    umount_target
+
+    ok "Installation complete."
+}
+
+step_finished() {
+    step "Finished"
+    banner "Installation complete - rebooting now"
+    info "The system has been installed on $DISK_TARGET."
+    info "Removing the live media and rebooting into the new system..."
+    sync
+    sleep 3
+    systemctl -i reboot || reboot
+}
+
+main() {
+    require_root
+    check_live_env
+    step_welcome
+    step_locale
+    step_keyboard
+    step_timezone
+    step_disk
+    step_user
+    step_software
+    step_summary
+    run_installation
+    step_finished
+}
+
+main "$@"
