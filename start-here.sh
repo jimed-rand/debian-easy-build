@@ -8,7 +8,7 @@ show_start_help() {
 start-here.sh -- guided launcher for Debian image builders.
 
 Usage:
-  ${self} [--output=iso|img|vm|removable] [builder options...]
+  ${self} [--output=iso|img|vm|removable] [--auto] [builder options...]
   ${self} --create-config [--output=...]
   ${self} --help
 
@@ -19,6 +19,7 @@ Dispatcher options:
                                 vm         VM disk image: raw .img + exports (scripts/build-vm.sh)
                                 removable  Removable-media disk image: raw .img for USB/SD/CF (scripts/build-removable.sh)
   --distro=debian               Target distribution (default: debian).
+  --auto                        Build automatically without interactive prompts.
   --create-config               Run the selected builder configuration wizard.
   -h, --help                    Show this help and exit.
 
@@ -33,11 +34,18 @@ Builders:
 
 Examples:
   ${self}
+  ${self} --auto
   ${self} --output=iso
-  ${self} --output=vm
+  ${self} --output=vm --auto
   ${self} --create-config --output=iso
 HELPEOF
 }
+
+BUILD_DISTRO="${BUILD_DISTRO:-debian}"
+BUILD_OUTPUT="${BUILD_OUTPUT:-}"
+AUTO_MODE=0
+GENERATE_CONFIG=0
+PASS_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
@@ -46,33 +54,8 @@ for arg in "$@"; do
             exit 0
             ;;
         --auto)
-            # Run in fully automated mode: skip any interactive prompts.
-            # This forces the underlying builder to use its non‑interactive path.
-            # Users can still supply a config file via --config=FILE.
-            # The flag is consumed here; remaining args are passed through.
             AUTO_MODE=1
             ;;
-    esac
-done
-
-if [[ -t 1 ]]; then
-    clear || true
-fi
-
-GENERATE_CONFIG=0
-CONFIG_PATH=""
-for arg in "$@"; do
-    case "$arg" in
-        --create-config|--generate-config) GENERATE_CONFIG=1 ;;
-        --config-path=*) CONFIG_PATH="${arg#--config-path=}" ;;
-    esac
-done
-
-BUILD_DISTRO="${BUILD_DISTRO:-debian}"
-BUILD_OUTPUT="${BUILD_OUTPUT:-}"
-PASS_ARGS=()
-for arg in "$@"; do
-    case "$arg" in
         --distro=*)
             BUILD_DISTRO="${arg#--distro=}"
             ;;
@@ -80,6 +63,7 @@ for arg in "$@"; do
             BUILD_OUTPUT="${arg#--output=}"
             ;;
         --create-config|--generate-config)
+            GENERATE_CONFIG=1
             ;;
         *)
             PASS_ARGS+=("$arg")
@@ -87,31 +71,19 @@ for arg in "$@"; do
     esac
 done
 
+if [[ "$AUTO_MODE" -eq 1 ]]; then
+    PASS_ARGS+=("--auto")
+    if [[ -z "$BUILD_OUTPUT" ]]; then
+        BUILD_OUTPUT="iso"
+    fi
+fi
+
 if [[ "$GENERATE_CONFIG" -eq 1 ]]; then
     PASS_ARGS+=("--generate-config")
 fi
 
-# If auto mode requested, ensure the builder runs non‑interactive.
-if [[ "${AUTO_MODE:-0}" -eq 1 ]]; then
-    PASS_ARGS+=("--no-interactive")
-    # When no explicit output type was provided, default to ISO silently.
-    if [[ -z "$BUILD_OUTPUT" ]]; then
-        BUILD_OUTPUT="iso"
-    fi
-    # If a config path was not supplied, default to a config file in the current directory.
-    if [[ -z "$CONFIG_PATH" ]]; then
-        CONFIG_PATH="$(pwd)/build.cfg"
-        # If the config does not exist, ask the builder to generate one.
-        if [[ ! -f "$CONFIG_PATH" ]]; then
-            GENERATE_CONFIG=1
-        fi
-    fi
-    # Pass the config path to the builder.
-    if [[ -n "$CONFIG_PATH" ]]; then
-        PASS_ARGS+=("--config=$CONFIG_PATH")
-    fi
-    # Keep the output files in the user's current folder.
-    PASS_ARGS+=("--output-dir=$(pwd)")
+if [[ -t 1 ]] && [[ "$AUTO_MODE" -eq 0 ]]; then
+    clear || true
 fi
 
 case "${BUILD_DISTRO,,}" in

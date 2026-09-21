@@ -40,7 +40,6 @@ function ui_kv() {
 }
 
 function ui_confirm() {
-    # If prompts are disabled, automatically accept the default.
     if ! prompts_enabled; then
         return 0
     fi
@@ -64,10 +63,16 @@ function ui_confirm() {
     done
 }
 
-FORCE_INTERACTIVE=0
+FORCE_INTERACTIVE=""
 
 function prompts_enabled() {
-    return 1
+    if [[ "$FORCE_INTERACTIVE" == "0" ]]; then
+        return 1
+    fi
+    if [[ "$FORCE_INTERACTIVE" == "1" ]]; then
+        return 0
+    fi
+    [[ -t 0 ]]
 }
 
 function assert_bool_var() {
@@ -509,7 +514,9 @@ function host_help() {
     echo "  --target-name=N  Output base ISO name"
     echo "  --grub-label=TEXT Live boot entry label [default: \"Try Debian before installing\"]"
     echo "  --grub-tty-only   Generate CLI/TTY-only GRUB boot configuration"
+    echo "  --auto           Run non-interactively [same as --no-interactive]"
     echo "  --no-interactive Run non-interactively"
+    echo "  --interactive    Force interactive prompts"
     echo "  --config=FILE    Load configuration file"
     echo "  --generate-config Generate configuration file"
     echo "  -h, --help       Show this help"
@@ -631,9 +638,7 @@ function resolve_desktop_selection() {
 function interactive_toggle_pick() {
     local var_name="$1" heading="$2" install_label="$3" skip_label="$4" prompt_label="$5"
 
-    # When prompts are disabled, fall back to environment variable value or default to 0.
     if ! prompts_enabled; then
-        # Use existing env var if set, otherwise default to 0 (disabled).
         if [[ -z "${!var_name}" ]]; then
             export "$var_name"="0"
         else
@@ -962,7 +967,7 @@ function parse_host_cli_args() {
             --grub-tty-only)   export GRUB_TTY_ONLY=1 ;;
             --workspace=*)     export DEBIAN_WORKSPACE="${1#--workspace=}" ;;
             --output-dir=*)    export DEB_OUTPUT_DIR="${1#--output-dir=}" ;;
-            --no-interactive)  FORCE_INTERACTIVE=0 ;;
+            --auto|--no-interactive) FORCE_INTERACTIVE=0 ;;
             --interactive)     FORCE_INTERACTIVE=1 ;;
             --no-confirm)      export NO_CONFIRM=1 ;;
             --config=*)        load_config_file "${1#--config=}" ;;

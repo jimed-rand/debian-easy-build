@@ -62,6 +62,9 @@ function ui_kv() {
 function ui_confirm() {
     local prompt="${1:-Proceed?}"
     local default="${2:-y}"
+    if [[ "${NO_CONFIRM:-0}" == "1" ]] || ! prompts_enabled; then
+        return 0
+    fi
     local hint yn
     if [[ "$default" == "y" ]]; then
         hint="[Y/n]"
@@ -83,7 +86,13 @@ function ui_confirm() {
 }
 
 function prompts_enabled() {
-    [[ -t 0 ]] && [[ "${INTERACTIVE_OVERRIDE:-1}" == "1" ]]
+    if [[ "${INTERACTIVE_OVERRIDE:-}" == "0" ]]; then
+        return 1
+    fi
+    if [[ "${INTERACTIVE_OVERRIDE:-}" == "1" ]]; then
+        return 0
+    fi
+    [[ -t 0 ]]
 }
 
 function set_defaults() {
@@ -853,6 +862,11 @@ Options:
   --password=PASS                     Password when user-mode=build (default: debian)
   --formats=qcow2,vdi,vmdk,vhdx|all   Export formats for VM kind (default: qcow2)
   --advanced                          Enable advanced workspace mode
+  --output-dir=DIR                    Directory to place output image
+  --auto                              Run non-interactively [same as --no-interactive]
+  --no-interactive                    Run non-interactively
+  --interactive                       Force interactive prompts
+  --no-confirm                        Skip confirmation prompts
   --config=FILE                       Load configuration file
   -h, --help                          Show this help
 
@@ -931,6 +945,26 @@ function host_main() {
             --advanced)
                 ADVANCED_MODE=1
                 shift
+                ;;
+            --auto|--no-interactive)
+                INTERACTIVE_OVERRIDE=0
+                shift
+                ;;
+            --interactive)
+                INTERACTIVE_OVERRIDE=1
+                shift
+                ;;
+            --no-confirm)
+                NO_CONFIRM=1
+                shift
+                ;;
+            --output-dir=*)
+                DEB_OUTPUT_DIR="${1#--output-dir=}"
+                shift
+                ;;
+            --output-dir)
+                DEB_OUTPUT_DIR="$2"
+                shift 2
                 ;;
             --config=*)
                 local cfg="${1#--config=}"

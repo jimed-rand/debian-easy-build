@@ -101,6 +101,12 @@ The simplest way to start is running the interactive launcher:
 ./start-here.sh
 ```
 
+To run a fully automated build without interactive prompts:
+
+```bash
+./start-here.sh --auto
+```
+
 To specify the output type directly:
 
 ```bash
@@ -108,6 +114,12 @@ To specify the output type directly:
 ./start-here.sh --output=vm
 ./start-here.sh --output=img
 ./start-here.sh --output=removable
+```
+
+To run an automated build for a specific output type:
+
+```bash
+./start-here.sh --output=vm --auto
 ```
 
 ### 2. Building a Live ISO Directly
@@ -277,9 +289,9 @@ Scripts run in alphabetical order by filename. Ensure your hook scripts have exe
 
 ## Host System Requirements
 
-- Linux operating system (Debian or Debian‑based distributions). For other Linux distributions the build can be run inside a Docker container with a rootful Docker socket (i.e., Docker daemon exposed to the container) and the required tools installed inside the container.
+- Linux operating system (Debian or Debian-based distributions). For other Linux distributions the build can be run inside a Docker container with a rootful Docker socket (i.e., Docker daemon exposed to the container) and the required tools installed inside the container.
 - Root or sudo privileges (or Docker rootful mode when using Docker).
-- Minimum 20 GB free disk space for ISO builds, 40+ GB for disk image builds.
+- Minimum 20 GB free disk space for ISO builds, 40+ GB for disk image builds.
 - Required host tools:
    - ISO builds: debootstrap, squashfs-tools, xorriso.
    - Image builds: debootstrap, parted, dosfstools, e2fsprogs, rsync, qemu-utils (for VM exports).
